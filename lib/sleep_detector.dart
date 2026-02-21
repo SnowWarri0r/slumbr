@@ -79,19 +79,32 @@ class SleepDetector {
   void _startChecking() {
     onStageChanged(SleepStage.awake, 1.0);
     _checkTimer = Timer.periodic(const Duration(seconds: 5), (_) {
-      final quietMinutes =
-          DateTime.now().difference(_lastNoiseTime).inMinutes;
-      final (stage, factor) = switch (quietMinutes) {
-        >= 15 => (SleepStage.deepSleep, 0.0),
-        >= 8 => (SleepStage.lightSleep, 0.3),
-        >= 3 => (SleepStage.fallingAsleep, 0.6),
-        _ => (SleepStage.awake, 1.0),
+      final quietSec =
+          DateTime.now().difference(_lastNoiseTime).inSeconds;
+      final quietMin = quietSec / 60.0;
+
+      // Stage thresholds (minutes)
+      final stage = switch (quietMin) {
+        >= 15 => SleepStage.deepSleep,
+        >= 8 => SleepStage.lightSleep,
+        >= 3 => SleepStage.fallingAsleep,
+        _ => SleepStage.awake,
       };
+
+      // Smooth factor: linearly interpolate within each stage range
+      // 0-3min → 1.0, 3-8min → 1.0→0.6, 8-15min → 0.6→0.3, 15+min → 0.3→0.0
+      final factor = switch (quietMin) {
+        >= 15 => (0.3 * (1.0 - ((quietMin - 15) / 5).clamp(0.0, 1.0))),
+        >= 8 => 0.3 + 0.3 * (1.0 - (quietMin - 8) / 7),
+        >= 3 => 0.6 + 0.4 * (1.0 - (quietMin - 3) / 5),
+        _ => 1.0,
+      };
+
       if (stage != _currentStage) {
         _currentStage = stage;
         _records.add(SleepRecord(stage, DateTime.now()));
       }
-      onStageChanged(stage, factor);
+      onStageChanged(stage, factor.clamp(0.0, 1.0));
     });
   }
 

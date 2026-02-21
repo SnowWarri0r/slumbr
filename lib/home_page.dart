@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 import 'sleep_detector.dart';
@@ -56,6 +57,7 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   final _player = AudioPlayer();
   SleepDetector? _detector;
+  Timer? _fadeTimer;
 
   bool _isPlaying = false;
   double _baseVolume = 0.7;
@@ -63,26 +65,47 @@ class _HomePageState extends State<HomePage> {
   int _selectedSound = 0;
   SleepStage _stage = SleepStage.awake;
   double _volumeFactor = 1.0;
+  double _currentVolume = 0.7;
   bool _calibrating = false;
 
   SoundItem get _currentSound => _categories[_selectedCategory].sounds[_selectedSound];
 
-  static const _stageInfo = {
-    SleepStage.awake: ('监测中...', Icons.visibility, 1.0),
-    SleepStage.fallingAsleep: ('入睡中 - 音量 60%', Icons.bedtime, 0.6),
-    SleepStage.lightSleep: ('浅睡眠 - 音量 30%', Icons.nights_stay, 0.3),
-    SleepStage.deepSleep: ('深睡眠 - 即将停止', Icons.dark_mode, 0.0),
+  static const _stageIcons = {
+    SleepStage.awake: Icons.visibility,
+    SleepStage.fallingAsleep: Icons.bedtime,
+    SleepStage.lightSleep: Icons.nights_stay,
+    SleepStage.deepSleep: Icons.dark_mode,
+  };
+
+  static const _stageNames = {
+    SleepStage.awake: '监测中',
+    SleepStage.fallingAsleep: '入睡中',
+    SleepStage.lightSleep: '浅睡眠',
+    SleepStage.deepSleep: '深睡眠',
   };
 
   @override
   void dispose() {
+    _fadeTimer?.cancel();
     _detector?.dispose();
     _player.dispose();
     super.dispose();
   }
 
   void _updateVolume() {
-    _player.setVolume(_baseVolume * _volumeFactor);
+    final target = _baseVolume * _volumeFactor;
+    _fadeTimer?.cancel();
+    // Fade over ~2 seconds in 20 steps
+    const steps = 20;
+    final start = _currentVolume;
+    final delta = target - start;
+    var step = 0;
+    _fadeTimer = Timer.periodic(const Duration(milliseconds: 100), (t) {
+      step++;
+      _currentVolume = start + delta * (step / steps);
+      _player.setVolume(_currentVolume.clamp(0.0, 1.0));
+      if (step >= steps) t.cancel();
+    });
     if (_stage == SleepStage.deepSleep) {
       Future.delayed(const Duration(seconds: 3), () {
         if (_stage == SleepStage.deepSleep && _isPlaying) _stopAndShowSummary();
@@ -170,13 +193,13 @@ class _HomePageState extends State<HomePage> {
     await _player.setAsset(_currentSound.asset);
     await _player.setLoopMode(LoopMode.one);
     await _player.setVolume(_baseVolume);
+    _currentVolume = _baseVolume;
     _player.play();
     setState(() { _isPlaying = true; _calibrating = true; });
   }
 
   @override
   Widget build(BuildContext context) {
-    final stageEntry = _stageInfo[_stage]!;
     return Scaffold(
       appBar: AppBar(title: const Text('Slumbr')),
       body: ListView(
@@ -188,10 +211,10 @@ class _HomePageState extends State<HomePage> {
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Icon(stageEntry.$2, size: 28),
+                Icon(_stageIcons[_stage], size: 28),
                 const SizedBox(width: 8),
                 Text(
-                  _calibrating ? '校准中...' : stageEntry.$1,
+                  _calibrating ? '校准中...' : '${_stageNames[_stage]} - 音量 ${(_volumeFactor * 100).toInt()}%',
                   style: const TextStyle(fontSize: 20),
                 ),
               ],
@@ -201,7 +224,8 @@ class _HomePageState extends State<HomePage> {
           Center(child: Text('音量: ${(_baseVolume * 100).toInt()}%')),
           Slider(value: _baseVolume, onChanged: (v) {
             setState(() => _baseVolume = v);
-            _player.setVolume(v * _volumeFactor);
+            _currentVolume = v * _volumeFactor;
+            _player.setVolume(_currentVolume);
           }),
           const SizedBox(height: 8),
           Center(
