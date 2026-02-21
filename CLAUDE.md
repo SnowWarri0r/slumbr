@@ -4,38 +4,44 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Ear Savior - 突发性耳聋辅助治疗 App，播放自然白噪音帮助用户入睡，定时渐弱音量。
+Slumbr - Smart sleep-aid app that plays ambient sounds and auto-fades volume using Silero VAD voice detection.
 
 ## Commands
 
 ```bash
-# 获取依赖
-flutter pub get
-
-# 运行应用
-flutter run
-
-# 代码分析
-flutter analyze
-
-# 清理构建
-flutter clean
+flutter pub get       # Install dependencies
+flutter run           # Run on connected device
+flutter analyze       # Static analysis
+flutter clean         # Clean build artifacts
+flutter build apk     # Build Android APK
 ```
 
 ## Architecture
 
-- `lib/main.dart` - 应用入口，MaterialApp 配置
-- `lib/home_page.dart` - 主页面，包含音频播放和定时器逻辑
-- `assets/audio/` - 白噪音音频资源 (rain.mp3, river.mp3, waves.mp3, forest.mp3)
+- `lib/main.dart` - App entry, MaterialApp with i18n (en/zh)
+- `lib/home_page.dart` - Main UI: sound picker, playback, volume fade, sleep summary with fl_chart
+- `lib/sleep_detector.dart` - audio_streamer + Silero VAD voice detection, sleep stage tracking, foreground service
+- `lib/i18n.dart` - Lightweight i18n (Chinese/English) via locale detection
+- `assets/audio/{rain,nature,noise,other}/` - 19 ambient sounds from Moodist
 
 ## Key Dependencies
 
-- `just_audio` - 音频播放，支持循环和音量控制
-- `audio_session` - 音频会话管理
-- `permission_handler` - 权限请求（麦克风等）
+- `just_audio` - Audio playback with looping and volume control
+- `audio_streamer` - Raw PCM microphone capture (feeds into VAD)
+- `vad` - Silero VAD model for voice activity detection
+- `flutter_foreground_task` - Android foreground service for screen-off operation
+- `fl_chart` - Sleep summary timeline chart
+- `permission_handler` - Microphone permission
+
+## Sleep Detection Pipeline
+
+audio_streamer (PCM float) → convert to PCM16 Uint8List → Silero VAD → onSpeechStart → reset silence timer
+
+Stages: awake (0-10min, 100%) → fallingAsleep (10-30min) → lightSleep (30-60min) → deepSleep (60min+, 10%, auto-stop)
 
 ## Android Configuration
 
 - compileSdk: 36, targetSdk: 34, minSdk: 21
-- Java 17 required
-- Gradle 8.9
+- NDK: 29.0.14206865
+- Java 17, Gradle 8.9
+- Foreground service permissions: FOREGROUND_SERVICE, FOREGROUND_SERVICE_MICROPHONE
