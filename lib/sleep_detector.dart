@@ -1,7 +1,9 @@
 import 'dart:async';
-import 'package:record/record.dart';
+import 'dart:typed_data';
+import 'package:audio_streamer/audio_streamer.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:path_provider/path_provider.dart';
+import 'package:vad/vad.dart';
 
 enum SleepStage { awake, fallingAsleep, lightSleep, deepSleep }
 
@@ -21,19 +23,16 @@ class SleepSummary {
 class SleepDetector {
   final void Function(SleepStage stage, double volumeFactor) onStageChanged;
 
-  final _recorder = AudioRecorder();
-  Timer? _pollTimer;
+  final _streamer = AudioStreamer();
+  final _audioController = StreamController<Uint8List>.broadcast();
+  StreamSubscription? _audioSub;
+  VadHandler? _vadHandler;
   Timer? _checkTimer;
 
-  double _baselineDb = 0;
-  final List<double> _calibrationReadings = [];
-  bool _calibrating = true;
-  DateTime _lastNoiseTime = DateTime.now();
+  DateTime _lastVoiceTime = DateTime.now();
   DateTime? _startTime;
   SleepStage _currentStage = SleepStage.awake;
   final List<SleepRecord> _records = [];
-
-  static const _noiseThreshold = 5.0;
 
   SleepDetector({required this.onStageChanged});
 
@@ -41,96 +40,113 @@ class SleepDetector {
     final status = await Permission.microphone.request();
     if (!status.isGranted) return false;
 
-    _calibrating = true;
-    _calibrationReadings.clear();
-    _lastNoiseTime = DateTime.now();
+    await _startForegroundService();
+
     _startTime = DateTime.now();
-    _records.clear();
-    _currentStage = SleepStage.awake;
-    _records.add(SleepRecord(SleepStage.awake, _startTime!));
+    _lastVoiceTime = DateTime.now();
+    _records.add(SleepRecord(SleepStage.awake, DateTime.now()));
 
-    final dir = await getTemporaryDirectory();
-    final path = '${dir.path}/slumbr_monitor.wav';
-    await _recorder.start(const RecordConfig(encoder: AudioEncoder.wav), path: path);
-
-    _pollTimer = Timer.periodic(const Duration(milliseconds: 500), (_) async {
-      final amp = await _recorder.getAmplitude();
-      final db = amp.current;
-      if (db <= -160) return;
-
-      if (_calibrating) {
-        _calibrationReadings.add(db);
-        return;
+    // Start audio_streamer and convert float samples to PCM16 Uint8List
+    _streamer.sampleRate = 16000;
+    _audioSub = _streamer.audioStream.listen((samples) {
+      final pcm = Int16List(samples.length);
+      for (var i = 0; i < samples.length; i++) {
+        pcm[i] = (samples[i].clamp(-1.0, 1.0) * 32767).toInt();
       }
-      if (db > _baselineDb + _noiseThreshold) {
-        _lastNoiseTime = DateTime.now();
-      }
+      _audioController.add(pcm.buffer.asUint8List());
     });
 
-    Timer(const Duration(seconds: 10), () {
-      if (_calibrationReadings.isNotEmpty) {
-        _baselineDb = _calibrationReadings.reduce((a, b) => a + b) /
-            _calibrationReadings.length;
-      }
-      _calibrating = false;
-      _startChecking();
+    _vadHandler = VadHandler.create();
+    _vadHandler!.onSpeechStart.listen((_) {
+      _lastVoiceTime = DateTime.now();
+      _emitCurrentState();
+    });
+
+    await _vadHandler!.startListening(
+      positiveSpeechThreshold: 0.5,
+      negativeSpeechThreshold: 0.35,
+      audioStream: _audioController.stream,
+    );
+
+    _checkTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      _emitCurrentState();
     });
 
     return true;
   }
 
-  void _startChecking() {
-    onStageChanged(SleepStage.awake, 1.0);
-    _checkTimer = Timer.periodic(const Duration(seconds: 5), (_) {
-      final quietSec =
-          DateTime.now().difference(_lastNoiseTime).inSeconds;
-      final quietMin = quietSec / 60.0;
+  void _emitCurrentState() {
+    final silence = DateTime.now().difference(_lastVoiceTime);
+    final secs = silence.inSeconds.toDouble();
+    SleepStage stage;
+    double factor;
 
-      // Stage thresholds (minutes)
-      final stage = switch (quietMin) {
-        >= 15 => SleepStage.deepSleep,
-        >= 8 => SleepStage.lightSleep,
-        >= 3 => SleepStage.fallingAsleep,
-        _ => SleepStage.awake,
-      };
+    // Awake: hold 1.0; then linear 1.0→0.1 over 10m~60m
+    if (secs < 600) {
+      stage = SleepStage.awake;
+      factor = 1.0;
+    } else if (secs < 1800) {
+      stage = SleepStage.fallingAsleep;
+      factor = 1.0 - ((secs - 600) / 3000) * 0.9;
+    } else if (secs < 3600) {
+      stage = SleepStage.lightSleep;
+      factor = 1.0 - ((secs - 600) / 3000) * 0.9;
+    } else {
+      stage = SleepStage.deepSleep;
+      factor = 0.1;
+    }
 
-      // Smooth factor: linearly interpolate within each stage range
-      // 0-3min → 1.0, 3-8min → 1.0→0.6, 8-15min → 0.6→0.3, 15+min → 0.3→0.0
-      final factor = switch (quietMin) {
-        >= 15 => (0.3 * (1.0 - ((quietMin - 15) / 5).clamp(0.0, 1.0))),
-        >= 8 => 0.3 + 0.3 * (1.0 - (quietMin - 8) / 7),
-        >= 3 => 0.6 + 0.4 * (1.0 - (quietMin - 3) / 5),
-        _ => 1.0,
-      };
-
-      if (stage != _currentStage) {
-        _currentStage = stage;
-        _records.add(SleepRecord(stage, DateTime.now()));
-      }
-      onStageChanged(stage, factor.clamp(0.0, 1.0));
-    });
+    if (stage != _currentStage) {
+      _currentStage = stage;
+      _records.add(SleepRecord(stage, DateTime.now()));
+    }
+    onStageChanged(stage, factor);
   }
 
-  SleepSummary getSummary() {
-    final now = DateTime.now();
-    final total = now.difference(_startTime ?? now);
+  SleepSummary? getSummary() {
+    if (_startTime == null) return null;
+    final total = DateTime.now().difference(_startTime!);
     final durations = <SleepStage, Duration>{};
     for (var i = 0; i < _records.length; i++) {
-      final end = i + 1 < _records.length ? _records[i + 1].timestamp : now;
+      final end = i + 1 < _records.length ? _records[i + 1].timestamp : DateTime.now();
       final d = end.difference(_records[i].timestamp);
       durations[_records[i].stage] = (durations[_records[i].stage] ?? Duration.zero) + d;
     }
-    return SleepSummary(total, durations, List.unmodifiable(_records));
+    return SleepSummary(total, durations, List.of(_records));
   }
 
   void stop() {
-    _pollTimer?.cancel();
     _checkTimer?.cancel();
-    _recorder.stop();
+    _checkTimer = null;
+    _audioSub?.cancel();
+    _audioSub = null;
+    _vadHandler?.stopListening();
+    FlutterForegroundTask.stopService();
   }
 
   void dispose() {
     stop();
-    _recorder.dispose();
+    _audioController.close();
+    _vadHandler?.dispose();
+    _vadHandler = null;
+  }
+
+  Future<void> _startForegroundService() async {
+    FlutterForegroundTask.init(
+      androidNotificationOptions: AndroidNotificationOptions(
+        channelId: 'slumbr_sleep',
+        channelName: 'Sleep Monitoring',
+        channelImportance: NotificationChannelImportance.LOW,
+      ),
+      iosNotificationOptions: const IOSNotificationOptions(),
+      foregroundTaskOptions: ForegroundTaskOptions(
+        eventAction: ForegroundTaskEventAction.nothing(),
+      ),
+    );
+    await FlutterForegroundTask.startService(
+      notificationTitle: 'Slumbr',
+      notificationText: 'Monitoring sleep...',
+      serviceTypes: [ForegroundServiceTypes.microphone],
+    );
   }
 }
