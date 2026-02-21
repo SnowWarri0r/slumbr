@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:record/record.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:path_provider/path_provider.dart';
 
 enum SleepStage { awake, fallingAsleep, lightSleep, deepSleep }
 
@@ -48,7 +49,9 @@ class SleepDetector {
     _currentStage = SleepStage.awake;
     _records.add(SleepRecord(SleepStage.awake, _startTime!));
 
-    await _recorder.start(const RecordConfig(encoder: AudioEncoder.wav), path: '');
+    final dir = await getTemporaryDirectory();
+    final path = '${dir.path}/slumbr_monitor.wav';
+    await _recorder.start(const RecordConfig(encoder: AudioEncoder.wav), path: path);
 
     _pollTimer = Timer.periodic(const Duration(milliseconds: 500), (_) async {
       final amp = await _recorder.getAmplitude();
