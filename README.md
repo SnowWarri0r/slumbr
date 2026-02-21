@@ -33,26 +33,27 @@ No timers to set, no manual adjustments. Just sleep.
 ## How It Works
 
 ```
-┌─────────────┐   Microphone    ┌─────────────┐   Volume    ┌─────────────┐
-│  Calibrate  │───────────────►│   Detect    │────────────►│    Fade     │
-│  (10 sec)   │   Amplitude    │ Sleep Stage │   Factor    │   Volume   │
-└─────────────┘   Monitoring   └─────────────┘  (smooth)   └─────────────┘
+┌─────────────┐   audio_streamer  ┌─────────────┐   Volume    ┌─────────────┐
+│  Microphone │───────────────►│  Silero VAD │────────────►│    Fade     │
+│  (PCM 16k)  │   Float→PCM16   │  Voice Det. │   Factor    │   Volume   │
+└─────────────┘                  └─────────────┘  (linear)   └─────────────┘
 ```
 
 1. Pick a sound from 4 categories and tap **Start**
-2. App calibrates baseline noise level for ~10 seconds
-3. Microphone monitors ambient noise every 500ms
-4. As your environment gets quieter, sleep stages progress:
+2. Audio plays immediately while Silero VAD loads in background
+3. Microphone captures audio via `audio_streamer`, fed into Silero VAD model
+4. VAD distinguishes human voice from speaker playback in real-time
+5. As silence duration increases, sleep stages progress:
 
 | Quiet Duration | Stage | Volume | Behavior |
 |:-:|:-:|:-:|:-:|
-| 0 – 3 min | Awake | 100% | Full volume |
-| 3 – 8 min | Falling Asleep | 100% → 60% | Gradual fade |
-| 8 – 15 min | Light Sleep | 60% → 30% | Continues fading |
-| 15 – 20 min | Deep Sleep | 30% → 0% | Fades to silence, stops |
+| 0 – 10 min | Awake | 100% | Full volume |
+| 10 – 30 min | Falling Asleep | 100% → 64% | Gradual fade |
+| 30 – 60 min | Light Sleep | 64% → 10% | Continues fading |
+| 60+ min | Deep Sleep | 10% | Fades to silence, stops |
 
-5. If noise is detected, volume smoothly ramps back up
-6. On stop, a **Sleep Summary** dialog shows your session history
+6. If voice is detected, volume smoothly ramps back up (5-second fade)
+7. On stop, a **Sleep Summary** dialog shows stage timeline chart and duration breakdown
 
 ## Sound Library
 
@@ -100,18 +101,21 @@ flutter build ios --release
 | Layer | Technology |
 |-------|------------|
 | Framework | Flutter + Material Design |
-| Audio | just_audio (looping, volume control) |
-| Recording | record (amplitude monitoring) |
+| Audio Playback | just_audio (looping, volume control) |
+| Microphone | audio_streamer (raw PCM capture) |
+| Voice Detection | vad (Silero VAD model) |
+| Background | flutter_foreground_task (screen-off operation) |
+| Charts | fl_chart (sleep timeline) |
 | Permissions | permission_handler |
-| Storage | path_provider |
+| i18n | Custom lightweight (en/zh) |
 
 ## Architecture
 
 ```
 lib/
-  main.dart            # App entry, MaterialApp config
-  home_page.dart       # Main UI — sound picker, playback, sleep status, summary dialog
-  sleep_detector.dart  # Microphone monitoring, stage detection, sleep recording
+  main.dart            # App entry, MaterialApp with i18n config
+  home_page.dart       # Main UI — sound picker, playback, volume fade, summary chart
+  sleep_detector.dart  # audio_streamer + Silero VAD, stage detection, foreground service
 
 assets/audio/
   rain/                # 5 rain & storm sounds
