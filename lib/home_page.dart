@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 import 'sleep_detector.dart';
@@ -96,22 +97,19 @@ class _HomePageState extends State<HomePage> {
   void _updateVolume() {
     final target = _baseVolume * _volumeFactor;
     _fadeTimer?.cancel();
-    // Fade over ~2 seconds in 20 steps
-    const steps = 20;
     final start = _currentVolume;
     final delta = target - start;
+    final steps = delta > 0 ? 50 : 20; // 升5秒，降2秒
     var step = 0;
     _fadeTimer = Timer.periodic(const Duration(milliseconds: 100), (t) {
       step++;
       _currentVolume = start + delta * (step / steps);
       _player.setVolume(_currentVolume.clamp(0.0, 1.0));
-      if (step >= steps) t.cancel();
-    });
-    if (_stage == SleepStage.deepSleep) {
-      Future.delayed(const Duration(seconds: 3), () {
+      if (step >= steps) {
+        t.cancel();
         if (_stage == SleepStage.deepSleep && _isPlaying) _stopAndShowSummary();
-      });
-    }
+      }
+    });
   }
 
   Future<void> _switchSound(int catIdx, int soundIdx) async {
@@ -134,6 +132,28 @@ class _HomePageState extends State<HomePage> {
   void _showSummaryDialog(SleepSummary summary) {
     final s = S.of(context);
     final names = _stageNames(s);
+    final stageY = {
+      SleepStage.awake: 3.0,
+      SleepStage.fallingAsleep: 2.0,
+      SleepStage.lightSleep: 1.0,
+      SleepStage.deepSleep: 0.0,
+    };
+    final startTime = summary.records.first.timestamp;
+    final spots = <FlSpot>[];
+    for (var i = 0; i < summary.records.length; i++) {
+      final x = summary.records[i].timestamp.difference(startTime).inSeconds / 60.0;
+      final y = stageY[summary.records[i].stage]!;
+      spots.add(FlSpot(x, y));
+      // Add horizontal segment to next record
+      if (i + 1 < summary.records.length) {
+        final nextX = summary.records[i + 1].timestamp.difference(startTime).inSeconds / 60.0;
+        spots.add(FlSpot(nextX, y));
+      } else {
+        final endX = summary.totalDuration.inSeconds / 60.0;
+        spots.add(FlSpot(endX, y));
+      }
+    }
+
     showDialog(
       context: context,
       builder: (_) => AlertDialog(
@@ -144,7 +164,46 @@ class _HomePageState extends State<HomePage> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text('${s.totalDuration}: ${s.fmtDuration(summary.totalDuration)}'),
-              const SizedBox(height: 12),
+              const SizedBox(height: 16),
+              SizedBox(
+                height: 180,
+                width: 280,
+                child: LineChart(LineChartData(
+                  minY: -0.2,
+                  maxY: 3.5,
+                  titlesData: FlTitlesData(
+                    bottomTitles: AxisTitles(sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: 28,
+                      getTitlesWidget: (v, _) => Text('${v.toInt()}m', style: const TextStyle(fontSize: 10)),
+                    )),
+                    leftTitles: AxisTitles(sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: 50,
+                      interval: 1,
+                      getTitlesWidget: (v, _) {
+                        final label = {3.0: names[SleepStage.awake], 2.0: names[SleepStage.fallingAsleep], 1.0: names[SleepStage.lightSleep], 0.0: names[SleepStage.deepSleep]};
+                        return Text(label[v] ?? '', style: const TextStyle(fontSize: 9));
+                      },
+                    )),
+                    topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                    rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  ),
+                  gridData: FlGridData(show: true, horizontalInterval: 1),
+                  borderData: FlBorderData(show: false),
+                  lineBarsData: [
+                    LineChartBarData(
+                      spots: spots,
+                      isCurved: false,
+                      color: Colors.teal.shade300,
+                      barWidth: 2.5,
+                      dotData: const FlDotData(show: false),
+                      belowBarData: BarAreaData(show: true, color: Colors.teal.withValues(alpha: 0.15)),
+                    ),
+                  ],
+                )),
+              ),
+              const SizedBox(height: 16),
               Text(s.stageDurations, style: const TextStyle(fontWeight: FontWeight.bold)),
               ...summary.stageDurations.entries.map((e) {
                 final pct = summary.totalDuration.inSeconds > 0
@@ -152,11 +211,6 @@ class _HomePageState extends State<HomePage> {
                     : 0;
                 return Text('  ${names[e.key]}: ${s.fmtDuration(e.value)} ($pct%)');
               }),
-              const SizedBox(height: 12),
-              Text(s.stageChanges, style: const TextStyle(fontWeight: FontWeight.bold)),
-              ...summary.records.map((r) =>
-                Text('  ${r.timestamp.hour}:${r.timestamp.minute.toString().padLeft(2, '0')} → ${names[r.stage]}'),
-              ),
             ],
           ),
         ),
@@ -171,6 +225,15 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
+    // Start playback immediately
+    await _player.setAsset(_currentSound.asset);
+    await _player.setLoopMode(LoopMode.one);
+    await _player.setVolume(_baseVolume);
+    _currentVolume = _baseVolume;
+    _player.play();
+    setState(() { _isPlaying = true; _calibrating = true; });
+
+    // Load VAD asynchronously
     _detector = SleepDetector(onStageChanged: (stage, factor) {
       setState(() { _stage = stage; _volumeFactor = factor; _calibrating = false; });
       _updateVolume();
@@ -183,15 +246,10 @@ class _HomePageState extends State<HomePage> {
           SnackBar(content: Text(S.of(context).micPermission)),
         );
       }
+      await _player.stop();
+      setState(() { _isPlaying = false; });
       return;
     }
-
-    await _player.setAsset(_currentSound.asset);
-    await _player.setLoopMode(LoopMode.one);
-    await _player.setVolume(_baseVolume);
-    _currentVolume = _baseVolume;
-    _player.play();
-    setState(() { _isPlaying = true; _calibrating = true; });
   }
 
   @override

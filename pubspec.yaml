@@ -34,10 +34,12 @@ dependencies:
   just_audio: ^0.10.5
   audio_session: ^0.2.2
   permission_handler: ^12.0.1
-  record: ^6.2.0
-  path_provider: ^2.1.5
   flutter_localizations:
     sdk: flutter
+  vad: ^0.0.7+1
+  audio_streamer: ^4.3.0
+  flutter_foreground_task: ^9.2.0
+  fl_chart: ^1.1.1
 
 dev_dependencies:
   flutter_test:
